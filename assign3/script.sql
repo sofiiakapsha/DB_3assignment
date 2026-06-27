@@ -136,3 +136,17 @@ CREATE TRIGGER delete_order_trigger
 AFTER DELETE ON order_items
 FOR EACH ROW
 EXECUTE FUNCTION delete_order_total();
+
+explain analyze
+select
+    oi.order_id,
+    c.full_name,
+    p.product_name,
+    oi.price,
+    o.order_date,
+    oi.price * oi.quantity as total_per_product
+from order_items oi
+join orders o on oi.order_id = o.order_id
+join customers c on o.customer_id = c.customer_id
+join products p on oi.product_id = p.product_id
+where oi.order_id = 2;
