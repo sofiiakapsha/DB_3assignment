@@ -36,29 +36,24 @@ create table order_log (
 );
 
 CREATE OR REPLACE FUNCTION calculate_order_total(p_order_id INT)
-RETURNS TABLE(customer_id INT, order_id INT, order_price NUMERIC(10, 2))
-LANGUAGE plpgsql
+RETURNS NUMERIC(10, 2)
+LANGUAGE SQL
 AS $$
-    SELECT
-        o.customer_id,
-        o.order_id,
-        COALESCE(SUM(oi.quantity * oi.price), 0)::NUMERIC(10, 2) AS order_price
-    FROM orders o
-    LEFT JOIN order_items oi ON o.order_id = oi.order_id
-    WHERE o.order_id = p_order_id
-    GROUP BY o.customer_id, o.order_id;
+    SELECT COALESCE(SUM(quantity * price), 0)::NUMERIC(10, 2)
+    FROM order_items
+    WHERE order_id = p_order_id;
 $$;
 
 CREATE OR REPLACE PROCEDURE create_order(o_customer_id INT)
-LANGUAGE plpgsql
+LANGUAGE SQL
 AS $$
    INSERT INTO orders (customer_id, order_date, total_amount)
 SELECT
     o_customer_id,
     CURRENT_TIMESTAMP,
     0.00
-FROM orders
-WHERE EXISTS (SELECT 1 FROM customers c WHERE c.customer_id = o_customer_id);
+FROM customers
+WHERE o_customer_id = customer_id;
 $$;
 
 CREATE OR REPLACE PROCEDURE add_product_to_order(
@@ -68,36 +63,76 @@ CREATE OR REPLACE PROCEDURE add_product_to_order(
 )
 LANGUAGE plpgsql
 AS $$
-    UPDATE products p2
+DECLARE
+    v_price numeric(10,2);
+    v_stock int;
+BEGIN
+    IF p_quantity <= 0 THEN
+        RAISE EXCEPTION 'Quantity must be greater than zero';
+    END IF;
+
+    SELECT price, stock_quantity INTO v_price, v_stock
+    FROM products
+    WHERE product_id = p_product_id;
+
+    IF v_stock < p_quantity THEN
+        RAISE EXCEPTION 'Not enough stock';
+    END IF;
+
+    UPDATE products
     SET stock_quantity = stock_quantity - p_quantity
-    WHERE p2.product_id = p_product_id
-    AND stock_quantity >= 0
-    AND p_quantity > 0;
+    WHERE product_id = p_product_id;
 
     INSERT INTO order_items (order_id, product_id, quantity, price)
-    SELECT
-        p_order_id,
-        p_product_id,
-        p_quantity,
-        p.price
-    FROM products p
-    WHERE p.product_id = p_product_id;
+    VALUES (p_order_id, p_product_id, p_quantity, v_price);
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION log_new_order()
 RETURNS TRIGGER
 AS $$
 BEGIN
-    IF OLD.order_id IS DISTINCT FROM NEW.order_id THEN
-        INSERT INTO order_log (order_id, customer_id, action, log_date)
-        VALUES (NEW.order_id, NEW.customer_id, NEW.action, NEW.log_date);
-    END IF;
-
+    INSERT INTO order_log (order_id, customer_id, action)
+    VALUES (NEW.order_id, NEW.customer_id, 'Order Created');
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-CREATE TRIGGER order_log
-AFTER UPDATE ON orders
+CREATE TRIGGER order_log_trigger
+AFTER INSERT ON orders
 FOR EACH ROW
 EXECUTE FUNCTION log_new_order();
+
+CREATE OR REPLACE FUNCTION update_order_total()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE orders
+    SET total_amount = calculate_order_total(NEW.order_id)
+    WHERE order_id = NEW.order_id;
+    RETURN NEW;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION delete_order_total()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $$
+BEGIN
+    UPDATE orders
+    SET total_amount = calculate_order_total(OLD.order_id)
+    WHERE order_id = OLD.order_id;
+    RETURN OLD;
+END;
+$$;
+
+CREATE TRIGGER update_order_trigger
+AFTER UPDATE OR INSERT ON order_items
+FOR EACH ROW
+EXECUTE FUNCTION update_order_total();
+
+CREATE TRIGGER delete_order_trigger
+AFTER DELETE ON order_items
+FOR EACH ROW
+EXECUTE FUNCTION delete_order_total();
